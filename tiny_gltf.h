@@ -360,6 +360,14 @@ struct Parameter {
     return -1;
   }
 
+  int TextureCoord() const {
+    const auto it = json_double_value.find("texCoord");
+    if (it != std::end(json_double_value)) {
+      return int(it->second);
+    }
+    return -1;
+  }
+
   /// Material factor, like the roughness or metalness of a material
   /// Returned value is only valid if the parameter represent a texture from a
   /// material
@@ -511,7 +519,17 @@ struct Accessor {
   std::vector<double> minValues;  // optional
   std::vector<double> maxValues;  // optional
 
-  // TODO(syoyo): "sparse"
+  // Attributes for sparse accessors
+  bool isSparse;
+
+  size_t sparseCount;
+
+  int idxBufferView;
+  int valBufferView;
+  int idxComponentType;
+  int valComponentType;
+  size_t idxByteOffset;
+  size_t valByteOffset;
 
   ///
   /// Utility function to compute byteStride for a given bufferView object.
@@ -877,6 +895,12 @@ class TinyGLTF {
                             bool embedBuffers,
                             bool writeBinary);
 
+  bool WriteGltfSceneToStream(Model *model,
+                              std::ostream &out,
+                              const std::string &filename,
+                              bool embedImages,
+                              bool embedBuffers,
+                              bool writeBinary);
   ///
   /// Set callback to use for loading image data
   ///
@@ -1430,7 +1454,7 @@ bool WriteImageData(const std::string *basepath, const std::string *filename,
   } else {
     // Write image to disc
     FsCallbacks *fs = reinterpret_cast<FsCallbacks *>(fsPtr);
-    if (fs != nullptr && fs->WriteWholeFile == nullptr) {
+    if (fs != nullptr && fs->WriteWholeFile != nullptr) {
       const std::string imagefilepath = JoinPath(*basepath, *filename);
       std::string writeError;
       if (!fs->WriteWholeFile(&writeError, imagefilepath, data,
@@ -1605,7 +1629,9 @@ static void UpdateImageObject(Image &image, std::string &baseDir, int index,
   if (image.uri.size()) {
     filename = GetBaseFilename(image.uri);
     ext = GetFilePathExtension(filename);
-
+    if (!image.image.size()) {
+        return;
+    }
   } else if (image.name.size()) {
     ext = MimeToExt(image.mimeType);
     // Otherwise use name as filename
@@ -2393,10 +2419,7 @@ static bool ParseBufferView(BufferView *bufferView, std::string *err,
 
 static bool ParseAccessor(Accessor *accessor, std::string *err, const json &o) {
   double bufferView = -1.0;
-  if (!ParseNumberProperty(&bufferView, err, o, "bufferView", true,
-                           "Accessor")) {
-    return false;
-  }
+  ParseNumberProperty(&bufferView, err, o, "bufferView", false, "Accessor");
 
   double byteOffset = 0.0;
   ParseNumberProperty(&byteOffset, err, o, "byteOffset", false, "Accessor");
@@ -2471,6 +2494,65 @@ static bool ParseAccessor(Accessor *accessor, std::string *err, const json &o) {
       }
       return false;
     }
+  }
+
+  // Sparse accessor?
+  accessor->isSparse = o.find("sparse") != o.end();
+  if (!accessor->isSparse && bufferView == -1) {
+    std::cout << "Accessor buffer view missing" << std::endl;
+    return false;
+  }
+
+  if (accessor->isSparse)
+  {
+    json sparse_o = o["sparse"];
+
+    double sparse_count;
+    if (!ParseNumberProperty(&sparse_count, err, sparse_o, "count", true, "Accessor")) {
+        std::cout << "Sparse accessor missing count." << std::endl;
+        return false;
+    }
+
+    double idxBufferView = 0.0;
+    if (!ParseNumberProperty(&idxBufferView, err, sparse_o["indices"], "bufferView", true, "Accessor")) {
+        std::cout << "Sparse accessor missing indices bufferView" << std::endl;
+        return false;
+    }
+
+    double valBufferView = 0.0;
+    if (!ParseNumberProperty(&valBufferView, err, sparse_o["values"], "bufferView", true, "Accessor")) {
+        std::cout << "Sparse accessor missing values bufferView" << std::endl;
+        return false;
+    }
+
+    double idxComponentType = 0.0;
+    if (!ParseNumberProperty(&idxComponentType, err, sparse_o["indices"], "componentType", true, "Accessor")) {
+        std::cout << "Sparse accessor missing indices componentType" << std::endl;
+        return false;
+    }
+
+    double valComponentType = 0.0;
+    if (!ParseNumberProperty(&valComponentType, err, sparse_o["values"], "componentType", true, "Accessor")) {
+        std::cout << "Sparse accessor missing values componentType" << std::endl;
+        return false;
+    }
+
+    double idxByteOffset = 0.0;
+    ParseNumberProperty(&idxByteOffset, err, sparse_o["indices"], "byteOffset", false, "Accessor");
+
+    double valByteOffset = 0.0;
+    ParseNumberProperty(&valByteOffset, err, sparse_o["values"], "byteOffset", false, "Accessor");
+
+
+    accessor->sparseCount = static_cast<size_t>(sparse_count);
+    accessor->idxByteOffset = static_cast<size_t>(idxByteOffset);
+    accessor->valByteOffset = static_cast<size_t>(valByteOffset);
+
+    accessor->idxBufferView = static_cast<int>(idxBufferView);
+    accessor->valBufferView = static_cast<int>(valBufferView);
+
+    accessor->idxComponentType = static_cast<int>(idxComponentType);
+    accessor->valComponentType = static_cast<int>(valComponentType);
   }
 
   ParseExtrasProperty(&(accessor->extras), o);
@@ -3767,7 +3849,7 @@ static bool ValueToJson(const Value &value, json *ret) {
       return false;
       break;
     case OBJECT_TYPE: {
-      Value::Object objMap = value.Get<Value::Object>();
+      const Value::Object& objMap = value.Get<Value::Object>();
       for (auto &it : objMap) {
         json elementJson;
         if (ValueToJson(it.second, &elementJson)) obj[it.first] = elementJson;
@@ -3817,6 +3899,8 @@ static void SerializeParameterMap(ParameterMap &param, json &o) {
            it != paramIt->second.json_double_value.end(); ++it) {
         if (it->first == "index") {
           json_double_value[it->first] = paramIt->second.TextureIndex();
+        } else if (it->first == "texCoord") {
+          json_double_value[it->first] = paramIt->second.TextureCoord();
         } else {
           json_double_value[it->first] = it->second;
         }
@@ -3846,7 +3930,26 @@ static void SerializeExtensionMap(ExtensionMap &extensions, json &o) {
 }
 
 static void SerializeGltfAccessor(Accessor &accessor, json &o) {
-  SerializeNumberProperty<int>("bufferView", accessor.bufferView, o);
+  if (accessor.isSparse) {
+    Value::Object sparse_idx_map;
+    sparse_idx_map["bufferView"] = Value(accessor.idxBufferView);
+    sparse_idx_map["byteOffset"] = Value(int(accessor.idxByteOffset));
+    sparse_idx_map["componentType"] = Value(accessor.idxComponentType);
+
+    Value::Object sparse_val_map;
+    sparse_val_map["bufferView"] = Value(accessor.valBufferView);
+    sparse_val_map["byteOffset"] = Value(int(accessor.valByteOffset));
+    sparse_val_map["componentType"] = Value(accessor.valComponentType);
+
+    Value::Object sparse_map;
+    sparse_map["indices"] = Value(sparse_idx_map);
+    sparse_map["values"]  = Value(sparse_val_map);
+    sparse_map["count"]   = Value(int(accessor.sparseCount));
+
+    SerializeValue("sparse", Value(sparse_map), o);
+  } else {
+    SerializeNumberProperty<int>("bufferView", accessor.bufferView, o);
+  }
 
   if (accessor.byteOffset != 0.0)
     SerializeNumberProperty<int>("byteOffset", int(accessor.byteOffset), o);
@@ -4004,7 +4107,12 @@ static void SerializeGltfBufferView(BufferView &bufferView, json &o) {
 }
 
 static void SerializeGltfImage(Image &image, json &o) {
-  SerializeStringProperty("uri", image.uri, o);
+  if (image.uri.empty()) {
+    SerializeStringProperty("mimeType", image.mimeType, o);
+    SerializeNumberProperty<int>("bufferView", image.bufferView, o);
+  } else {
+    SerializeStringProperty("uri", image.uri, o);
+  }
 
   if (image.name.size()) {
     SerializeStringProperty("name", image.name, o);
@@ -4097,6 +4205,8 @@ static void SerializeGltfMesh(Mesh &mesh, json &o) {
   if (mesh.extras.Type() != NULL_TYPE) {
     SerializeValue("extras", mesh.extras, o);
   }
+
+  SerializeExtensionMap(mesh.extensions, o);
 }
 
 static void SerializeGltfLight(Light &light, json &o) {
@@ -4233,45 +4343,88 @@ static void SerializeGltfTexture(Texture &texture, json &o) {
   SerializeExtensionMap(texture.extensions, o);
 }
 
-static void WriteGltfFile(const std::string &output,
-                          const std::string &content) {
-  std::ofstream gltfFile(output.c_str());
-  gltfFile << content << std::endl;
+static void WriteGltfStream(std::ostream &output,
+                            const std::string &content) {
+  output << content << std::endl;
 }
 
-static void WriteBinaryGltfFile(const std::string &output,
-                                const std::string &content) {
-  std::ofstream gltfFile(output.c_str(), std::ios::binary);
-
+static void WriteBinaryGltfStream(std::ostream &output,
+                                  const std::string &content,
+                                  Buffer &buffer) {
+  output.seekp(0);
   const std::string header = "glTF";
-  const int version = 2;
-  const int padding_size = content.size() % 4;
+  const uint32_t version = 2;
+  const uint32_t padding_size = (content.size() % 4 == 0) ? 0 : 4 - content.size() % 4;
 
   // 12 bytes for header, JSON content length, 8 bytes for JSON chunk info, padding
-  const int length = 12 + 8 + content.size() + padding_size;
+  const uint32_t length = 12 + 8 + content.size() + padding_size;
   
-  gltfFile.write(header.c_str(), header.size());
-  gltfFile.write(reinterpret_cast<const char *>(&version), sizeof(version));
-  gltfFile.write(reinterpret_cast<const char *>(&length), sizeof(length));
+  output.write(header.c_str(), header.size());
+  output.write(reinterpret_cast<const char *>(&version), sizeof(version));
+  // Total length will over-written in later when we know the buffer length as well.
+  output.write(reinterpret_cast<const char *>(&length), sizeof(length));
 
   // JSON chunk info, then JSON data
-  const int model_length = content.size() + padding_size;
-  const int model_format = 0x4E4F534A;
-  gltfFile.write(reinterpret_cast<const char *>(&model_length), sizeof(model_length));
-  gltfFile.write(reinterpret_cast<const char *>(&model_format), sizeof(model_format));
-  gltfFile.write(content.c_str(), content.size());
+  const uint32_t model_length = content.size() + padding_size;
+  const uint32_t model_format = 0x4E4F534A;
+  output.write(reinterpret_cast<const char *>(&model_length), sizeof(model_length));
+  output.write(reinterpret_cast<const char *>(&model_format), sizeof(model_format));
+  output.write(content.c_str(), content.size());
 
   // Chunk must be multiplies of 4, so pad with spaces
   if (padding_size > 0) {
     const std::string padding = std::string(padding_size, ' ');
-    gltfFile.write(padding.c_str(), padding.size());
+    output.write(padding.c_str(), padding.size());
   }
+
+  // Write out the binary buffer.
+  uint32_t binHeader = (uint32_t) output.tellp();
+  const char glb2BinaryHeader[] = {
+    0x00, 0x00, 0x00, 0x00, // chunk length: written in later
+    'B', 'I', 'N', 0x00,    // chunk type: 0x004E4942 aka BIN
+  };
+  output.write(glb2BinaryHeader, 8);
+
+  uint32_t binaryBufferSize = buffer.data.size();
+  output.write(reinterpret_cast<const char *>(&buffer.data[0]),
+                                              std::streamsize(buffer.data.size()));
+
+  // Add padding to make binary buffer byte aligned.
+  while ((binaryBufferSize % 4) != 0) {
+    output.put('\0');
+    binaryBufferSize++;
+  }
+
+  uint32_t totalLength = (uint32_t) output.tellp();
+
+  // seek back to sub-header for json chunk
+  output.seekp(8);
+
+  // write total length, little-endian
+  output.put((totalLength >> 0) & 0xFF);
+  output.put((totalLength >> 8) & 0xFF);
+  output.put((totalLength >> 16) & 0xFF);
+  output.put((totalLength >> 24) & 0xFF);
+
+  // seek back to the gltf 2.0 binary chunk header
+  output.seekp(binHeader);
+
+  // write total length, little-endian
+  output.put((binaryBufferSize >> 0) & 0xFF);
+  output.put((binaryBufferSize >> 8) & 0xFF);
+  output.put((binaryBufferSize >> 16) & 0xFF);
+  output.put((binaryBufferSize >> 24) & 0xFF);
+
+  // be tidy and return write pointer to end-of-file
+  output.seekp(0, std::ios::end);
 }
 
-bool TinyGLTF::WriteGltfSceneToFile(Model *model, const std::string &filename,
-                                    bool embedImages = false,
-                                    bool embedBuffers = false,
-                                    bool writeBinary = false) {
+bool TinyGLTF::WriteGltfSceneToStream(Model *model,
+                                      std::ostream &out,
+                                      const std::string &filename,
+                                      bool embedImages = false,
+                                      bool embedBuffers = false,
+                                      bool writeBinary = false) {
   json output;
 
   // ACCESSORS
@@ -4319,15 +4472,24 @@ bool TinyGLTF::WriteGltfSceneToFile(Model *model, const std::string &filename,
 
   // BUFFERS (We expect only one buffer here)
   json buffers;
-  for (unsigned int i = 0; i < model->buffers.size(); ++i) {
+  if (writeBinary) {
+    // When writing in binary mode we are assuming that only one buffer exists.
+    assert(model->buffers.size() == 1);
+    // When writing in binary, simply add the size of the buffer
     json buffer;
-    if (embedBuffers) {
-      SerializeGltfBuffer(model->buffers[i], buffer);
-    } else {
-      SerializeGltfBuffer(model->buffers[i], buffer, binSaveFilePath,
-                          binFilename);
-    }
+    SerializeValue("byteLength", Value((int)model->buffers[0].data.size()), buffer);
     buffers.push_back(buffer);
+  } else {
+    for (unsigned int i = 0; i < model->buffers.size(); ++i) {
+      json buffer;
+      if (embedBuffers) {
+        SerializeGltfBuffer(model->buffers[i], buffer);
+      } else {
+        SerializeGltfBuffer(model->buffers[i], buffer, binSaveFilePath,
+                            binFilename);
+      }
+      buffers.push_back(buffer);
+    }
   }
   output["buffers"] = buffers;
 
@@ -4359,7 +4521,7 @@ bool TinyGLTF::WriteGltfSceneToFile(Model *model, const std::string &filename,
       json image;
 
       UpdateImageObject(model->images[i], baseDir, int(i), embedImages,
-                        &this->WriteImageData, &this->write_image_user_data_);
+                        &this->WriteImageData, this->write_image_user_data_);
       SerializeGltfImage(model->images[i], image);
       images.push_back(image);
     }
@@ -4489,12 +4651,32 @@ bool TinyGLTF::WriteGltfSceneToFile(Model *model, const std::string &filename,
   }
 
   if (writeBinary) {
-    WriteBinaryGltfFile(filename, output.dump());
+    WriteBinaryGltfStream(out, output.dump(), model->buffers[0]);
   } else {
-    WriteGltfFile(filename, output.dump());
+    WriteGltfStream(out, output.dump());
   }
 
   return true;
+}
+
+bool TinyGLTF::WriteGltfSceneToFile(Model *model, const std::string &filename,
+                                    bool embedImages = false,
+                                    bool embedBuffers = false,
+                                    bool writeBinary = false) {
+
+    std::ofstream out;
+    if (writeBinary) {
+        out.open(filename.c_str(), std::ios::binary);
+    } else {
+        out.open(filename.c_str());
+    }
+
+    if (!out) {
+        return false;
+    }
+    
+    return WriteGltfSceneToStream(model, out, filename,
+                                  embedImages, embedBuffers, writeBinary);
 }
 
 }  // namespace tinygltf
