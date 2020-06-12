@@ -39,8 +39,10 @@
 
 #include <array>
 #include <cassert>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <map>
 #include <string>
 #include <vector>
@@ -891,16 +893,16 @@ class TinyGLTF {
   /// Write glTF to file.
   ///
   bool WriteGltfSceneToFile(Model *model, const std::string &filename,
-                            bool embedImages,
-                            bool embedBuffers,
-                            bool writeBinary);
+                            bool embedImages = false,
+                            bool embedBuffers = false,
+                            bool writeBinary = false);
 
   bool WriteGltfSceneToStream(Model *model,
                               std::ostream &out,
                               const std::string &filename,
-                              bool embedImages,
-                              bool embedBuffers,
-                              bool writeBinary);
+                              bool embedImages = false,
+                              bool embedBuffers = false,
+                              bool writeBinary = false);
   ///
   /// Set callback to use for loading image data
   ///
@@ -1962,7 +1964,7 @@ static bool ParseStringProperty(
   }
 
   if (ret) {
-    (*ret) = it.value();
+    (*ret) = it.value().get<std::string>();
   }
 
   return true;
@@ -4422,9 +4424,9 @@ static void WriteBinaryGltfStream(std::ostream &output,
 bool TinyGLTF::WriteGltfSceneToStream(Model *model,
                                       std::ostream &out,
                                       const std::string &filename,
-                                      bool embedImages = false,
-                                      bool embedBuffers = false,
-                                      bool writeBinary = false) {
+                                      bool embedImages,
+                                      bool embedBuffers,
+                                      bool writeBinary) {
   json output;
 
   // ACCESSORS
@@ -4660,9 +4662,9 @@ bool TinyGLTF::WriteGltfSceneToStream(Model *model,
 }
 
 bool TinyGLTF::WriteGltfSceneToFile(Model *model, const std::string &filename,
-                                    bool embedImages = false,
-                                    bool embedBuffers = false,
-                                    bool writeBinary = false) {
+                                    bool embedImages,
+                                    bool embedBuffers,
+                                    bool writeBinary) {
 
     std::ofstream out;
     if (writeBinary) {
